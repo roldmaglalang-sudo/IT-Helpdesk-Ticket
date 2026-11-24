@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IT Helpdesk</title>
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+<style>
+  :root{--ink:#16232e;--paper:#f2f4f3;--line:#d9dfdc;--accent:#17614f;}
+  body{background:var(--paper);color:var(--ink);font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+  .side{background:var(--ink);min-height:100vh}
+  .side a{color:#c9d6d1;text-decoration:none;display:block;padding:.55rem 1rem;border-radius:6px}
+  .side a:hover,.side a.on{background:#243746;color:#fff}
+  .brand{color:#fff;font-weight:700;font-size:1.15rem;padding:1rem}
+  .btn-main{background:var(--accent);color:#fff;border:0}.btn-main:hover{background:#115040;color:#fff}
+  .panel{background:#fff;border:1px solid var(--line);border-radius:8px}
+  .stat{background:#fff;border:1px solid var(--line);border-radius:8px;padding:.9rem 1rem;border-left:4px solid var(--accent)}
+  .stat .n{font-size:1.9rem;font-weight:700;line-height:1}
+  .b-Low{background:#6c7a89}.b-Medium{background:#2f6fa5}.b-High{background:#c47a12}.b-Critical{background:#b3261e}
+  .s-Open{background:#2f6fa5}.s-In-Progress{background:#7a4fb5}.s-Pending{background:#c47a12}.s-Resolved{background:#17614f}.s-Closed{background:#6c7a89}
+  .msg{border-left:3px solid var(--line);padding:.4rem .8rem;margin-bottom:.8rem;white-space:pre-wrap}
+  .msg.staff{border-color:var(--accent)} .msg.sys{color:#5b6b78;font-size:.88rem;border-style:dashed}
+  tr.click{cursor:pointer} :focus-visible{outline:3px solid #f0b429;outline-offset:2px}
+  @media(max-width:767px){.side{min-height:0}}
+</style>
+</head>
+<body>
+<div id="app"></div>
+<script>
+/* ====== EDIT THESE 3 VALUES AFTER DEPLOYING THE BACKEND ====== */
+const CFG = {
+  API: "https://5hfueuevvjzaxb7vds4xsoakp40csowb.lambda-url.ap-southeast-1.on.aws",       // e.g. https://abc123.lambda-url.ap-southeast-1.on.aws
+  REGION: "ap-southeast-1",
+  CLIENT_ID: "4v6r1rk83koo32pptssq0svhmb"
+};
+/* ============================================================== */
+const STATUSES=["Open","In Progress","Pending","Resolved","Closed"], PRIOS=["Low","Medium","High","Critical"];
+const ROLE={employee:"Employee",it_support:"IT Support",admin:"Administrator"};
+let S={me:null,cats:[]};
+const $=s=>document.querySelector(s);
+const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const fmt=d=>d?new Date(String(d).replace(" ","T")).toLocaleString():"";
+const sid=id=>"TKT-"+String(id).slice(0,8).toUpperCase();
+const pb=p=>`<span class="badge b-${p}">${p}</span>`, sb=s=>`<span class="badge s-${s.replace(" ","-")}">${s}</span>`;
+const opts=(arr,sel)=>arr.map(a=>`<option ${a===sel?"selected":""}>${a}</option>`).join("");
+const flash=(m,ok)=>{const e=$("#flash");if(e){e.className="alert alert-"+(ok?"success":"danger");e.textContent=m;e.classList.remove("d-none");scrollTo(0,0)}};
+
+/* ---------- Cognito (direct API calls, no library) ---------- */
+async function cog(target,body){
+  const r=await fetch(`https://cognito-idp.${CFG.REGION}.amazonaws.com/`,{method:"POST",
+    headers:{"Content-Type":"application/x-amz-json-1.1","X-Amz-Target":"AWSCognitoIdentityProviderService."+target},body:JSON.stringify(body)});
+  const j=await r.json(); if(!r.ok) throw new Error(j.message||j.__type||"Request failed"); return j;
+}
+const keep=r=>{sessionStorage.setItem("at",r.AccessToken); if(r.RefreshToken) sessionStorage.setItem("rt",r.RefreshToken)};
+async function refresh(){const j=await cog("InitiateAuth",{AuthFlow:"REFRESH_TOKEN_AUTH",ClientId:CFG.CLIENT_ID,AuthParameters:{REFRESH_TOKEN:sessionStorage.getItem("rt")}});keep(j.AuthenticationResult)}
+function logout(){sessionStorage.clear();S.me=null;location.hash="";showAuth()}
+
+/* ---------- API ---------- */
+async function api(path,o={},retry=true){
+  const r=await fetch(CFG.API.replace(/\/$/,"")+path,{method:o.method||"GET",
+    headers:{"Authorization":"Bearer "+(sessionStorage.getItem("at")||""),"Content-Type":"application/json"},
+    body:o.body?JSON.stringify(o.body):undefined});
+  if(r.status===401&&retry&&sessionStorage.getItem("rt")){try{await refresh();return api(path,o,false)}catch(e){logout();throw e}}
+  const j=await r.json().catch(()=>({}));
+  if(!r.ok){if(r.status===401)logout();throw new Error(j.error||"Request failed ("+r.status+")")}
+  return j;
+}
+
+/* ---------- Auth screen ---------- */
+function showAuth(mode="login",msg=""){
+  $("#app").innerHTML=`<div class="container" style="max-width:440px;padding-top:9vh">
+  <h1 class="h3 mb-1">IT Helpdesk</h1><p class="text-secondary">Report a problem and follow it until it is fixed.</p>
+  <div class="panel p-4"><div id="flash" class="alert ${msg?"alert-info":"d-none"}">${esc(msg)}</div>
+  ${mode==="login"?`<form onsubmit="return doLogin(event)">
+    <label class="form-label">Email</label><input id="em" type="email" class="form-control mb-3" required autocomplete="username">
+    <label class="form-label">Password</label><input id="pw" type="password" class="form-control mb-3" required autocomplete="current-password">
+    <button class="btn btn-main w-100">Sign in</button></form>
+    <p class="mt-3 mb-0 small">No account? <a href="#" onclick="showAuth('register');return false">Create one</a></p>`
+  :mode==="register"?`<form onsubmit="return doReg(event)">
+    <label class="form-label">Full name</label><input id="nm" class="form-control mb-3" required>
+    <label class="form-label">Email</label><input id="em" type="email" class="form-control mb-3" required>
+    <label class="form-label">Password</label><input id="pw" type="password" class="form-control" minlength="8" required>
+    <div class="form-text mb-3">At least 8 characters with upper and lower case letters, a number and a symbol.</div>
+    <button class="btn btn-main w-100">Create account</button></form>
+    <p class="mt-3 mb-0 small"><a href="#" onclick="showAuth('login');return false">Back to sign in</a></p>`
+  :`<form onsubmit="return doConfirm(event)">
+    <p>We sent a 6-digit code to <b>${esc(sessionStorage.getItem("pend"))}</b>.</p>
+    <input id="cd" class="form-control mb-3" placeholder="Verification code" required>
+    <button class="btn btn-main w-100">Verify email</button></form>`}
+  </div></div>`;
+}
+async function doLogin(e){e.preventDefault();try{const j=await cog("InitiateAuth",{AuthFlow:"USER_PASSWORD_AUTH",ClientId:CFG.CLIENT_ID,AuthParameters:{USERNAME:$("#em").value.trim(),PASSWORD:$("#pw").value}});keep(j.AuthenticationResult);await start()}catch(x){flash(x.message)}return false}
+async function doReg(e){e.preventDefault();const em=$("#em").value.trim();try{await cog("SignUp",{ClientId:CFG.CLIENT_ID,Username:em,Password:$("#pw").value,UserAttributes:[{Name:"email",Value:em},{Name:"name",Value:$("#nm").value.trim()}]});sessionStorage.setItem("pend",em);showAuth("confirm")}catch(x){flash(x.message)}return false}
+async function doConfirm(e){e.preventDefault();try{await cog("ConfirmSignUp",{ClientId:CFG.CLIENT_ID,Username:sessionStorage.getItem("pend"),ConfirmationCode:$("#cd").value.trim()});showAuth("login","Email verified. You can sign in now.")}catch(x){flash(x.message)}return false}
+
+/* ---------- Shell + router ---------- */
+async function start(){
+  try{S.me=await api("/api/me");S.cats=await api("/api/categories")}catch(e){return showAuth("login",sessionStorage.getItem("at")?e.message:"")}
+  const r=S.me.role, L=[["#/dashboard","Dashboard"],["#/tickets",r==="employee"?"My tickets":r==="it_support"?"Assigned tickets":"All tickets"]];
+  if(r==="employee"||r==="admin")L.push(["#/new","New ticket"]);
+  if(r==="admin")L.push(["#/users","Users"],["#/categories","Categories"]);
+  $("#app").innerHTML=`<div class="container-fluid"><div class="row">
+   <nav class="col-md-2 side p-2" id="nav"><div class="brand">IT Helpdesk</div>${L.map(l=>`<a href="${l[0]}">${l[1]}</a>`).join("")}
+     <div class="px-3 pt-4 small text-light">${esc(S.me.full_name)}<br><span class="text-secondary">${ROLE[r]}</span></div>
+     <a href="#" onclick="logout();return false" class="mt-2">Sign out</a></nav>
+   <main class="col-md-10 p-4"><div id="flash" class="alert d-none"></div><div id="view"></div></main></div></div>`;
+  if(!location.hash||location.hash==="#")location.hash="#/dashboard"; route();
+}
+async function route(){
+  if(!S.me)return; const h=location.hash||"#/dashboard", m=h.split("/");
+  document.querySelectorAll("#nav a").forEach(a=>a.classList.toggle("on",a.getAttribute("href")===h));
+  $("#flash").classList.add("d-none");
+  try{
+    if(m[1]==="tickets")await vList(); else if(m[1]==="new")vNew(); else if(m[1]==="ticket")await vTicket(m[2]);
+    else if(m[1]==="users"&&S.me.role==="admin")await vUsers(); else if(m[1]==="categories"&&S.me.role==="admin")await vCats(); else await vDash();
+  }catch(e){flash(e.message)}
+}
+addEventListener("hashchange",route);
+
+/* ---------- Views ---------- */
+function table(rows){
+  if(!rows.length)return `<div class="panel p-4 text-secondary">No tickets here yet.</div>`;
+  return `<div class="panel table-responsive"><table class="table table-hover mb-0 align-middle"><thead><tr><th>ID</th><th>Subject</th><th>Category</th><th>Priority</th><th>Status</th><th>Assigned to</th><th>Created</th></tr></thead><tbody>`+
+  rows.map(t=>`<tr class="click" onclick="location.hash='#/ticket/${t.id}'"><td>${sid(t.id)}</td><td>${esc(t.subject)}</td><td>${esc(t.category)}</td><td>${pb(t.priority)}</td><td>${sb(t.status)}</td><td>${esc(t.assigned_name||"Unassigned")}</td><td>${fmt(t.created_at)}</td></tr>`).join("")+`</tbody></table></div>`;
+}
+async function vDash(){
+  const [st,ts]=await Promise.all([api("/api/stats"),api("/api/tickets")]);
+  $("#view").innerHTML=`<h2 class="h4 mb-3">Dashboard</h2><div class="row g-3 mb-4">
+   <div class="col-6 col-md"><div class="stat"><div class="n">${st.total}</div>Total tickets</div></div>`+
+   STATUSES.map(s=>`<div class="col-6 col-md"><div class="stat"><div class="n">${st.by_status[s]||0}</div>${s}</div></div>`).join("")+`</div>`+
+   (st.users?`<p class="text-secondary">Users: ${st.users.employee||0} employees, ${st.users.it_support||0} IT support, ${st.users.admin||0} administrators.</p>`:"")+
+   `<h3 class="h5">Recent tickets</h3>`+table(ts.slice(0,8));
+}
+async function vList(f=""){
+  const ts=await api("/api/tickets"+(f?"?status="+encodeURIComponent(f):""));
+  $("#view").innerHTML=`<div class="d-flex justify-content-between mb-3"><h2 class="h4">Tickets</h2>
+   <select class="form-select w-auto" onchange="vList(this.value)"><option value="">All statuses</option>${opts(STATUSES,f)}</select></div>`+table(ts);
+}
+function vNew(){
+  $("#view").innerHTML=`<h2 class="h4 mb-3">New ticket</h2><form class="panel p-4" onsubmit="return mkTicket(event)">
+   <label class="form-label">Subject</label><input id="sj" class="form-control mb-3" maxlength="200" required>
+   <div class="row"><div class="col-md-6 mb-3"><label class="form-label">Category</label><select id="ct" class="form-select">${S.cats.filter(c=>c.is_active).map(c=>`<option value="${c.id}">${esc(c.name)}</option>`).join("")}</select></div>
+   <div class="col-md-6 mb-3"><label class="form-label">Priority</label><select id="pr" class="form-select">${opts(PRIOS,"Medium")}</select></div></div>
+   <label class="form-label">What is happening?</label><textarea id="ds" class="form-control mb-3" rows="5" required></textarea>
+   <label class="form-label">Screenshots or documents (optional, up to 5 MB each)</label><input id="fl" type="file" multiple class="form-control mb-3">
+   <button class="btn btn-main" id="sb">Submit ticket</button></form>`;
+}
+async function mkTicket(e){
+  e.preventDefault();$("#sb").disabled=true;
+  try{
+    const t=await api("/api/tickets",{method:"POST",body:{subject:$("#sj").value,description:$("#ds").value,category_id:$("#ct").value,priority:$("#pr").value}});
+    for(const f of $("#fl").files)await upload(t.id,f);
+    location.hash="#/ticket/"+t.id;
+  }catch(x){flash(x.message);$("#sb").disabled=false}
+  return false;
+}
+async function upload(tid,f){
+  const ct=f.type||"application/octet-stream";
+  const p=await api(`/api/tickets/${tid}/attachments/presign`,{method:"POST",body:{file_name:f.name,content_type:ct,size:f.size}});
+  const r=await fetch(p.upload_url,{method:"PUT",headers:{"Content-Type":ct},body:f});
+  if(!r.ok)throw new Error("Upload to storage failed for "+f.name);
+  await api(`/api/tickets/${tid}/attachments`,{method:"POST",body:p});
+}
+async function vTicket(id){
+  const d=await api("/api/tickets/"+id), t=d.ticket, r=S.me.role, staff=r==="admin"?await api("/api/staff"):[];
+  const canWork=r!=="employee"&&(r==="admin"||t.assigned_to===S.me.id);
+  $("#view").innerHTML=`<a href="#/tickets">&larr; Back to tickets</a>
+  <div class="d-flex flex-wrap gap-2 align-items-center my-2"><h2 class="h4 mb-0">${esc(t.subject)}</h2>${pb(t.priority)}${sb(t.status)}</div>
+  <p class="text-secondary">${sid(t.id)} &bull; ${esc(t.category)} &bull; opened by ${esc(t.created_by_name)} on ${fmt(t.created_at)}</p>
+  <div class="row g-3"><div class="col-lg-8">
+   <div class="panel p-3 mb-3"><div style="white-space:pre-wrap">${esc(t.description)}</div></div>
+   <h3 class="h6">Conversation and history</h3>
+   ${d.messages.map(m=>`<div class="msg ${m.is_system?"sys":m.sender_role!=="employee"?"staff":""}"><b>${m.is_system?"System":esc(m.sender)}</b> <span class="text-secondary small">${fmt(m.created_at)}</span><br>${esc(m.body)}</div>`).join("")||'<p class="text-secondary">No messages yet.</p>'}
+   <div class="panel p-3"><textarea id="mb" class="form-control mb-2" rows="3" placeholder="Write a reply"></textarea><button class="btn btn-main" onclick="sendMsg('${t.id}')">Send reply</button></div>
+  </div><div class="col-lg-4">
+   <div class="panel p-3 mb-3"><h3 class="h6">Details</h3><div class="small mb-2">Assigned to: <b>${esc(t.assigned_name||"Unassigned")}</b></div>
+    ${canWork?`<label class="form-label small">Status</label><select class="form-select mb-2" onchange="upd('${t.id}',{status:this.value})">${opts(STATUSES,t.status)}</select>
+     <label class="form-label small">Priority</label><select class="form-select mb-2" onchange="upd('${t.id}',{priority:this.value})">${opts(PRIOS,t.priority)}</select>
+     <button class="btn btn-sm btn-outline-success mb-2" onclick="upd('${t.id}',{status:'Resolved'})">Mark resolved</button>`:""}
+    ${r==="admin"?`<label class="form-label small">Assign to</label><select class="form-select" onchange="upd('${t.id}',{assigned_to:this.value})"><option value="">Unassigned</option>${staff.map(s=>`<option value="${s.id}" ${s.id===t.assigned_to?"selected":""}>${esc(s.full_name)} (${ROLE[s.role]})</option>`).join("")}</select>`:""}
+    ${r==="employee"?(t.status==="Resolved"||t.status==="Closed"?`<button class="btn btn-sm btn-outline-secondary" onclick="upd('${t.id}',{status:'Open'})">Reopen</button> `:"")+(t.status!=="Closed"?`<button class="btn btn-sm btn-outline-secondary" onclick="upd('${t.id}',{status:'Closed'})">Close ticket</button>`:""):""}
+   </div>
+   <div class="panel p-3"><h3 class="h6">Attachments</h3>
+    ${d.attachments.map(a=>`<div class="small mb-1"><a href="${a.url}" target="_blank" rel="noopener">${esc(a.file_name)}</a> <span class="text-secondary">${Math.ceil(a.size_bytes/1024)} KB, ${esc(a.uploader)}</span></div>`).join("")||'<p class="small text-secondary">No files attached.</p>'}
+    <input id="af" type="file" class="form-control form-control-sm mt-2"><button class="btn btn-sm btn-outline-secondary mt-2" onclick="addFile('${t.id}')">Upload file</button>
+   </div></div></div>`;
+}
+async function sendMsg(id){const b=$("#mb").value.trim();if(!b)return;try{await api(`/api/tickets/${id}/messages`,{method:"POST",body:{body:b}});await vTicket(id)}catch(e){flash(e.message)}}
+async function upd(id,body){try{await api("/api/tickets/"+id,{method:"PATCH",body});await vTicket(id)}catch(e){flash(e.message);await vTicket(id)}}
+async function addFile(id){const f=$("#af").files[0];if(!f)return flash("Choose a file first");try{await upload(id,f);await vTicket(id)}catch(e){flash(e.message)}}
+async function vUsers(){
+  const us=await api("/api/users");
+  $("#view").innerHTML=`<h2 class="h4 mb-3">Users</h2><p class="text-secondary">New people register themselves. They start as Employee. Change their role here.</p>
+  <div class="panel table-responsive"><table class="table mb-0 align-middle"><thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Active</th></tr></thead><tbody>`+
+  us.map(u=>{const me=u.id===S.me.id;return `<tr><td>${esc(u.full_name)}</td><td>${esc(u.email)}</td>
+   <td><select class="form-select form-select-sm w-auto" ${me?"disabled":""} onchange="setUser('${u.id}',{role:this.value})">${Object.keys(ROLE).map(k=>`<option value="${k}" ${k===u.role?"selected":""}>${ROLE[k]}</option>`).join("")}</select></td>
+   <td><input type="checkbox" class="form-check-input" ${u.is_active?"checked":""} ${me?"disabled":""} onchange="setUser('${u.id}',{is_active:this.checked})"></td></tr>`}).join("")+`</tbody></table></div>`;
+}
+async function setUser(id,b){try{await api("/api/users/"+id,{method:"PATCH",body:b});flash("Saved",true)}catch(e){flash(e.message)}await vUsers()}
+async function vCats(){
+  S.cats=await api("/api/categories");
+  $("#view").innerHTML=`<h2 class="h4 mb-3">Ticket categories</h2><div class="panel p-3 mb-3"><div class="input-group"><input id="cn" class="form-control" placeholder="New category name"><button class="btn btn-main" onclick="addCat()">Add category</button></div></div>
+  <div class="panel"><ul class="list-group list-group-flush">`+S.cats.map(c=>`<li class="list-group-item d-flex justify-content-between align-items-center">${esc(c.name)}
+   <button class="btn btn-sm btn-outline-secondary" onclick="togCat('${c.id}')">${c.is_active?"Disable":"Enable"}</button></li>`).join("")+`</ul></div>`;
+}
+async function addCat(){try{await api("/api/categories",{method:"POST",body:{name:$("#cn").value}});await vCats()}catch(e){flash(e.message)}}
+async function togCat(id){try{await api(`/api/categories/${id}/toggle`,{method:"POST",body:{}});await vCats()}catch(e){flash(e.message)}}
+
+sessionStorage.getItem("at")?start():showAuth();
+</script>
+</body>
+</html>
