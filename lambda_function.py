@@ -1,4 +1,4 @@
-"""IT Helpdesk backend v2 - one AWS Lambda function (Python 3.12).
+"""IT Helpdesk backend v3 (each administrator gets a separate helpdesk) - one AWS Lambda function (Python 3.12).
 Env vars: DSQL_ENDPOINT, FILES_BUCKET, USER_POOL_ID
 Libraries: boto3 (built in) + pg8000 (from the Lambda layer).
 Test events: {"action":"init"} creates tables, {"action":"reset"} drops everything and recreates it.
@@ -23,6 +23,7 @@ MAX_FILE = 5 * 1024 * 1024
 OK_TYPES = {"application/pdf", "text/plain", "application/zip",
             "application/msword", "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"}
+DEFAULT_CATEGORIES = ["Hardware", "Software", "Network", "Account Access", "Email", "Other"]
 SORTS = {"newest": "t.created_at DESC", "oldest": "t.created_at ASC", "updated": "t.updated_at DESC",
          "priority": "CASE t.priority WHEN 'Critical' THEN 1 WHEN 'High' THEN 2 WHEN 'Medium' THEN 3 ELSE 4 END, t.created_at DESC",
          "status": "t.status, t.created_at DESC"}
@@ -30,6 +31,11 @@ SORTS = {"newest": "t.created_at DESC", "oldest": "t.created_at ASC", "updated":
 # ---------------------------------------------------------------- SCHEMA
 # Aurora DSQL rules: one DDL statement per transaction, indexes use CREATE INDEX ASYNC.
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS organizations (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 CREATE TABLE IF NOT EXISTS roles (
   name TEXT PRIMARY KEY,
   description TEXT NOT NULL
@@ -39,17 +45,20 @@ CREATE TABLE IF NOT EXISTS users (
   cognito_sub TEXT NOT NULL UNIQUE,
   email TEXT NOT NULL UNIQUE,
   full_name TEXT NOT NULL,
+  org_id UUID NOT NULL REFERENCES organizations(id),
   role TEXT NOT NULL DEFAULT 'employee' REFERENCES roles(name),
   is_active BOOLEAN NOT NULL DEFAULT TRUE,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE TABLE IF NOT EXISTS ticket_categories (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  name TEXT NOT NULL UNIQUE,
+  org_id UUID NOT NULL REFERENCES organizations(id),
+  name TEXT NOT NULL,
   is_active BOOLEAN NOT NULL DEFAULT TRUE
 );
 CREATE TABLE IF NOT EXISTS tickets (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  org_id UUID NOT NULL REFERENCES organizations(id),
   subject TEXT NOT NULL,
   description TEXT NOT NULL,
   category_id UUID REFERENCES ticket_categories(id),
@@ -103,6 +112,9 @@ CREATE TABLE IF NOT EXISTS notifications (
   is_read BOOLEAN NOT NULL DEFAULT FALSE,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+CREATE INDEX ASYNC idx_users_org ON users (org_id);
+CREATE INDEX ASYNC idx_categories_org ON ticket_categories (org_id);
+CREATE INDEX ASYNC idx_tickets_org ON tickets (org_id);
 CREATE INDEX ASYNC idx_tickets_created_by ON tickets (created_by);
 CREATE INDEX ASYNC idx_tickets_assigned_to ON tickets (assigned_to);
 CREATE INDEX ASYNC idx_messages_ticket ON ticket_messages (ticket_id);
@@ -113,15 +125,9 @@ CREATE INDEX ASYNC idx_notifications_user ON notifications (user_id);
 INSERT INTO roles (name, description) VALUES ('employee', 'Submits and tracks IT support requests') ON CONFLICT (name) DO NOTHING;
 INSERT INTO roles (name, description) VALUES ('it_support', 'Handles, assigns and resolves tickets') ON CONFLICT (name) DO NOTHING;
 INSERT INTO roles (name, description) VALUES ('admin', 'Manages user roles and monitors the whole system') ON CONFLICT (name) DO NOTHING;
-INSERT INTO ticket_categories (name) VALUES ('Hardware') ON CONFLICT (name) DO NOTHING;
-INSERT INTO ticket_categories (name) VALUES ('Software') ON CONFLICT (name) DO NOTHING;
-INSERT INTO ticket_categories (name) VALUES ('Network') ON CONFLICT (name) DO NOTHING;
-INSERT INTO ticket_categories (name) VALUES ('Account Access') ON CONFLICT (name) DO NOTHING;
-INSERT INTO ticket_categories (name) VALUES ('Email') ON CONFLICT (name) DO NOTHING;
-INSERT INTO ticket_categories (name) VALUES ('Other') ON CONFLICT (name) DO NOTHING;
 """
 RESET = ["notifications", "ticket_activity_logs", "ticket_attachments", "ticket_messages",
-         "ticket_assignments", "tickets", "ticket_categories", "users", "roles"]
+         "ticket_assignments", "tickets", "ticket_categories", "users", "roles", "organizations"]
 
 # ---------------------------------------------------------------- helpers
 class Err(Exception):
@@ -181,16 +187,21 @@ def auth(headers):
         raise Err(401, "Session expired. Please sign in again.")
     a = {x["Name"]: x["Value"] for x in info["UserAttributes"]}
     sub, email = a["sub"], a.get("email", info["Username"])
-    cols = "id, role, is_active, full_name, email"
-    rows = q(f"SELECT {cols} FROM users WHERE cognito_sub=:s", s=sub)
-    if not rows:  # first login creates the profile. The very first user becomes the administrator.
-        first = q("SELECT COUNT(*) AS n FROM users")[0]["n"] == 0
-        rows = q(f"INSERT INTO users (cognito_sub,email,full_name,role) VALUES (:s,:e,:n,:r) RETURNING {cols}",
-                 s=sub, e=email, n=a.get("name") or email, r="admin" if first else "employee")
+    sel = """SELECT u.id, u.role, u.is_active, u.full_name, u.email, u.org_id, o.name AS org_name
+             FROM users u JOIN organizations o ON o.id=u.org_id WHERE u.cognito_sub=:s"""
+    rows = q(sel, s=sub)
+    if not rows:  # first login of a brand-new account: it gets its OWN helpdesk and becomes its administrator
+        name = a.get("name") or email
+        org = q("INSERT INTO organizations (name) VALUES (:n) RETURNING id", n=name[:80] + "'s helpdesk")[0]["id"]
+        for c in DEFAULT_CATEGORIES:
+            q("INSERT INTO ticket_categories (org_id,name) VALUES (CAST(:o AS uuid),:n)", o=str(org), n=c)
+        q("INSERT INTO users (cognito_sub,email,full_name,role,org_id) VALUES (:s,:e,:n,'admin',CAST(:o AS uuid))",
+          s=sub, e=email, n=name[:100], o=str(org))
+        rows = q(sel, s=sub)
     u = rows[0]
     if not u["is_active"]:
         raise Err(403, "This account is disabled")
-    u["id"] = str(u["id"])
+    u["id"], u["org_id"] = str(u["id"]), str(u["org_id"])
     return u
 
 
@@ -210,7 +221,7 @@ def load_ticket(u, tid):
     r = q("""SELECT t.*, c.name AS category, cu.full_name AS created_by_name, au.full_name AS assigned_name
              FROM tickets t LEFT JOIN ticket_categories c ON c.id=t.category_id
              JOIN users cu ON cu.id=t.created_by LEFT JOIN users au ON au.id=t.assigned_to
-             WHERE t.id=CAST(:id AS uuid)""", id=tid)
+             WHERE t.id=CAST(:id AS uuid) AND t.org_id=CAST(:org AS uuid)""", id=tid, org=u["org_id"])
     if not r:
         raise Err(404, "Ticket not found")
     t = r[0]
@@ -231,10 +242,11 @@ def notify(uid, tid, text):
           u=str(uid), t=tid, m=text)
 
 
-def notify_staff(tid, text):
+def notify_staff(tid, text, org):
     q("""INSERT INTO notifications (user_id,ticket_id,message)
-         SELECT id, CAST(:t AS uuid), CAST(:m AS TEXT) FROM users WHERE role='it_support' AND is_active""",
-      t=tid, m=text)
+         SELECT id, CAST(:t AS uuid), CAST(:m AS TEXT) FROM users
+         WHERE role='it_support' AND is_active AND org_id=CAST(:o AS uuid)""",
+      t=tid, m=text, o=org)
 
 
 def scope(u):
@@ -242,26 +254,28 @@ def scope(u):
 
 # ---------------------------------------------------------------- routes
 def r_me(u, b, qs):
-    return {"id": u["id"], "role": u["role"], "full_name": u["full_name"], "email": u["email"]}
+    return {"id": u["id"], "role": u["role"], "full_name": u["full_name"], "email": u["email"], "org_name": u["org_name"]}
 
 
 def r_stats(u, b, qs):
     sc = scope(u)
-    p = {"uid": u["id"]} if u["role"] == "employee" else {}
-    by = {r["status"]: r["n"] for r in q(f"SELECT t.status, COUNT(*) AS n FROM tickets t WHERE {sc} GROUP BY t.status", **p)}
+    p = {"org": u["org_id"]}
+    if u["role"] == "employee":
+        p["uid"] = u["id"]
+    by = {r["status"]: r["n"] for r in q(f"SELECT t.status, COUNT(*) AS n FROM tickets t WHERE t.org_id=CAST(:org AS uuid) AND {sc} GROUP BY t.status", **p)}
     res = {"by_status": by, "total": sum(by.values())}
     if u["role"] == "admin":
-        res["users"] = {r["role"]: r["n"] for r in q("SELECT role, COUNT(*) AS n FROM users GROUP BY role")}
+        res["users"] = {r["role"]: r["n"] for r in q("SELECT role, COUNT(*) AS n FROM users WHERE org_id=CAST(:o AS uuid) GROUP BY role", o=u["org_id"])}
     if u["role"] == "it_support":
         res["mine"] = q("""SELECT COUNT(*) AS n FROM tickets WHERE assigned_to=CAST(:u AS uuid)
-                           AND status NOT IN ('Resolved','Closed')""", u=u["id"])[0]["n"]
+                           AND status NOT IN ('Resolved','Closed') AND org_id=CAST(:o AS uuid)""", u=u["id"], o=u["org_id"])[0]["n"]
         res["available"] = q("""SELECT COUNT(*) AS n FROM tickets WHERE assigned_to IS NULL
-                                AND status NOT IN ('Resolved','Closed')""")[0]["n"]
+                                AND status NOT IN ('Resolved','Closed') AND org_id=CAST(:o AS uuid)""", o=u["org_id"])[0]["n"]
     return res
 
 
 def r_categories(u, b, qs):
-    return q("SELECT id, name, is_active FROM ticket_categories ORDER BY name")
+    return q("SELECT id, name, is_active FROM ticket_categories WHERE org_id=CAST(:o AS uuid) ORDER BY name", o=u["org_id"])
 
 
 def r_cat_add(u, b, qs):
@@ -269,7 +283,8 @@ def r_cat_add(u, b, qs):
     name = (b.get("name") or "").strip()[:60]
     if not name:
         raise Err(400, "Category name is required")
-    q("INSERT INTO ticket_categories (name) VALUES (:n) ON CONFLICT (name) DO NOTHING", n=name)
+    if not q("SELECT 1 AS x FROM ticket_categories WHERE org_id=CAST(:o AS uuid) AND lower(name)=lower(:n)", o=u["org_id"], n=name):
+        q("INSERT INTO ticket_categories (org_id,name) VALUES (CAST(:o AS uuid),:n)", o=u["org_id"], n=name)
     return {"ok": True}
 
 
@@ -277,12 +292,12 @@ def r_cat_toggle(u, b, qs, cid):
     need(u, "admin")
     if not is_uuid(cid):
         raise Err(404, "Not found")
-    q("UPDATE ticket_categories SET is_active = NOT is_active WHERE id=CAST(:i AS uuid)", i=cid)
+    q("UPDATE ticket_categories SET is_active = NOT is_active WHERE id=CAST(:i AS uuid) AND org_id=CAST(:o AS uuid)", i=cid, o=u["org_id"])
     return {"ok": True}
 
 
 def r_tickets(u, b, qs):
-    where, p = ["(" + scope(u) + ")"], {}
+    where, p = ["(t.org_id=CAST(:org AS uuid))", "(" + scope(u) + ")"], {"org": u["org_id"]}
     if u["role"] == "employee":
         p["uid"] = u["id"]
     if qs.get("status") in STATUSES:
@@ -317,12 +332,14 @@ def r_ticket_new(u, b, qs):
         raise Err(400, "Title and description are required")
     if pr not in PRIORITIES or not is_uuid(b.get("category_id")):
         raise Err(400, "Choose a valid category and priority")
-    r = q("""INSERT INTO tickets (subject,description,category_id,priority,created_by)
-             VALUES (:s,:d,CAST(:c AS uuid),:p,CAST(:u AS uuid)) RETURNING id""",
-          s=subject[:200], d=desc[:5000], c=b["category_id"], p=pr, u=u["id"])
+    if not q("SELECT 1 AS x FROM ticket_categories WHERE id=CAST(:c AS uuid) AND org_id=CAST(:o AS uuid) AND is_active", c=b["category_id"], o=u["org_id"]):
+        raise Err(400, "Choose a valid category")
+    r = q("""INSERT INTO tickets (org_id,subject,description,category_id,priority,created_by)
+             VALUES (CAST(:o AS uuid),:s,:d,CAST(:c AS uuid),:p,CAST(:u AS uuid)) RETURNING id""",
+          o=u["org_id"], s=subject[:200], d=desc[:5000], c=b["category_id"], p=pr, u=u["id"])
     tid = str(r[0]["id"])
     log(tid, u["id"], "created", f"Ticket created with {pr} priority")
-    notify_staff(tid, f"{sid(tid)}: new ticket from {u['full_name']} - {subject[:60]}")
+    notify_staff(tid, f"{sid(tid)}: new ticket from {u['full_name']} - {subject[:60]}", u["org_id"])
     return {"id": tid}
 
 
@@ -370,7 +387,7 @@ def r_msg_add(u, b, qs, tid):
         if t["assigned_to"]:
             notify(t["assigned_to"], tid, f"{sid(tid)}: {u['full_name']} sent a new message")
         else:
-            notify_staff(tid, f"{sid(tid)}: {u['full_name']} sent a new message")
+            notify_staff(tid, f"{sid(tid)}: {u['full_name']} sent a new message", u["org_id"])
     return {"ok": True}
 
 
@@ -404,7 +421,7 @@ def r_ticket_patch(u, b, qs, tid):
             raise Err(400, "Invalid staff member")
         who = "nobody"
         if new:
-            ok = q("SELECT full_name FROM users WHERE id=CAST(:i AS uuid) AND is_active AND role='it_support'", i=new)
+            ok = q("SELECT full_name FROM users WHERE id=CAST(:i AS uuid) AND is_active AND role='it_support' AND org_id=CAST(:o AS uuid)", i=new, o=u["org_id"])
             if not ok:
                 raise Err(400, "Pick an active IT support member")
             who = ok[0]["full_name"]
@@ -472,7 +489,7 @@ def r_notifs_read(u, b, qs):
 
 def r_users(u, b, qs):
     need(u, "admin")
-    return q("SELECT id, email, full_name, role, is_active, created_at FROM users ORDER BY created_at")
+    return q("SELECT id, email, full_name, role, is_active, created_at FROM users WHERE org_id=CAST(:o AS uuid) ORDER BY created_at", o=u["org_id"])
 
 
 def r_user_create(u, b, qs):
@@ -483,20 +500,26 @@ def r_user_create(u, b, qs):
         raise Err(400, "Name, email and a valid role are required")
     if not POOL:
         raise Err(500, "USER_POOL_ID is not set on the Lambda function")
+    if q("SELECT 1 AS x FROM users WHERE email=:e", e=email):
+        raise Err(400, "That email already belongs to a helpdesk account")
+    note = "Account created"
     try:
         r = cognito.admin_create_user(UserPoolId=POOL, Username=email, MessageAction="SUPPRESS", UserAttributes=[
             {"Name": "email", "Value": email}, {"Name": "email_verified", "Value": "true"}, {"Name": "name", "Value": name}])
+        sub = next(a["Value"] for a in r["User"]["Attributes"] if a["Name"] == "sub")
+        try:
+            cognito.admin_set_user_password(UserPoolId=POOL, Username=email, Password=pw, Permanent=True)
+        except Exception:
+            cognito.admin_delete_user(UserPoolId=POOL, Username=email)
+            raise Err(400, "Password too weak: use 8+ characters with upper and lower case, a number and a symbol")
     except cognito.exceptions.UsernameExistsException:
-        raise Err(400, "That email already has an account")
-    try:
-        cognito.admin_set_user_password(UserPoolId=POOL, Username=email, Password=pw, Permanent=True)
-    except Exception:
-        cognito.admin_delete_user(UserPoolId=POOL, Username=email)
-        raise Err(400, "Password too weak: use 8+ characters with upper and lower case, a number and a symbol")
-    sub = next(a["Value"] for a in r["User"]["Attributes"] if a["Name"] == "sub")
-    q("INSERT INTO users (cognito_sub,email,full_name,role) VALUES (:s,:e,:n,:r) ON CONFLICT (email) DO NOTHING",
-      s=sub, e=email, n=name[:100], r=role)
-    return {"ok": True}
+        # The person already has a login but has not entered any helpdesk yet: link it, keep their own password.
+        info = cognito.admin_get_user(UserPoolId=POOL, Username=email)
+        sub = next(a["Value"] for a in info["UserAttributes"] if a["Name"] == "sub")
+        note = "That email already had a login, so it was linked to your helpdesk. They keep their own password."
+    q("INSERT INTO users (cognito_sub,email,full_name,role,org_id) VALUES (:s,:e,:n,:r,CAST(:o AS uuid))",
+      s=sub, e=email, n=name[:100], r=role, o=u["org_id"])
+    return {"ok": True, "note": note}
 
 
 def r_user_patch(u, b, qs, uid):
@@ -505,6 +528,8 @@ def r_user_patch(u, b, qs, uid):
         raise Err(404, "Not found")
     if uid == u["id"]:
         raise Err(400, "You cannot change your own role or status")
+    if not q("SELECT 1 AS x FROM users WHERE id=CAST(:i AS uuid) AND org_id=CAST(:o AS uuid)", i=uid, o=u["org_id"]):
+        raise Err(404, "User not found")
     if "role" in b:
         if b["role"] not in ROLES:
             raise Err(400, "Invalid role")
@@ -520,7 +545,7 @@ def r_user_delete(u, b, qs, uid):
         raise Err(404, "Not found")
     if uid == u["id"]:
         raise Err(400, "You cannot delete your own account")
-    row = q("SELECT email, cognito_sub FROM users WHERE id=CAST(:i AS uuid)", i=uid)
+    row = q("SELECT email, cognito_sub FROM users WHERE id=CAST(:i AS uuid) AND org_id=CAST(:o AS uuid)", i=uid, o=u["org_id"])
     if not row:
         raise Err(404, "User not found")
     # Keep the ticket history intact: only accounts with no tickets, messages, files or actions can be deleted.
@@ -546,14 +571,15 @@ def r_user_delete(u, b, qs, uid):
 
 def r_staff(u, b, qs):
     need(u, "admin", "it_support")
-    return q("SELECT id, full_name FROM users WHERE is_active AND role='it_support' ORDER BY full_name")
+    return q("SELECT id, full_name FROM users WHERE is_active AND role='it_support' AND org_id=CAST(:o AS uuid) ORDER BY full_name", o=u["org_id"])
 
 
 def r_activity(u, b, qs):
     need(u, "admin")  # what IT support staff have been doing
     return q("""SELECT l.created_at, l.action, l.details, s.full_name AS actor, t.id AS ticket_id, t.subject
                 FROM ticket_activity_logs l JOIN users s ON s.id=l.actor_id JOIN tickets t ON t.id=l.ticket_id
-                WHERE s.role='it_support' ORDER BY l.created_at DESC LIMIT 100""")
+                WHERE s.role='it_support' AND t.org_id=CAST(:o AS uuid)
+                ORDER BY l.created_at DESC LIMIT 100""", o=u["org_id"])
 
 
 ROUTES = [
