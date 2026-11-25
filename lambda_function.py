@@ -11,8 +11,12 @@ REGION = os.environ.get("AWS_REGION", "ap-southeast-1")
 ENDPOINT = os.environ["DSQL_ENDPOINT"]
 BUCKET = os.environ["FILES_BUCKET"]
 POOL = os.environ.get("USER_POOL_ID", "")
-s3 = boto3.client("s3", region_name=REGION,
-                  config=Config(signature_version="s3v4", s3={"addressing_style": "virtual"}))
+try:  # new boto3 adds checksum parameters to signed URLs, which breaks uploads straight from the browser
+    S3CFG = Config(signature_version="s3v4", s3={"addressing_style": "virtual"},
+                   request_checksum_calculation="when_required", response_checksum_validation="when_required")
+except TypeError:  # older boto3 does not have these options and does not need them
+    S3CFG = Config(signature_version="s3v4", s3={"addressing_style": "virtual"})
+s3 = boto3.client("s3", region_name=REGION, config=S3CFG)
 cognito = boto3.client("cognito-idp", region_name=REGION)
 dsql = boto3.client("dsql", region_name=REGION)
 
@@ -275,7 +279,7 @@ def r_stats(u, b, qs):
 
 
 def r_categories(u, b, qs):
-    return q("SELECT id, name, is_active FROM ticket_categories WHERE org_id=CAST(:o AS uuid) ORDER BY name", o=u["org_id"])
+    return q("SELECT id, name, is_active FROM ticket_categories WHERE org_id=CAST(:o AS uuid) ORDER BY CASE WHEN name='Other' THEN 1 ELSE 0 END, name", o=u["org_id"])
 
 
 def r_cat_add(u, b, qs):
@@ -445,6 +449,24 @@ def r_ticket_patch(u, b, qs, tid):
     return {"ok": True}
 
 
+def r_ticket_delete(u, b, qs, tid):
+    t = load_ticket(u, tid)
+    if u["role"] != "employee":
+        raise Err(403, "Only the employee who submitted a ticket can delete it")
+    if t["status"] != "Open" or t["assigned_to"] is not None:
+        raise Err(400, "This ticket is already being handled, so it cannot be deleted. You can close it instead.")
+    keys = [a["s3_key"] for a in q("SELECT s3_key FROM ticket_attachments WHERE ticket_id=CAST(:t AS uuid)", t=tid)]
+    for tbl in ("notifications", "ticket_activity_logs", "ticket_messages", "ticket_attachments", "ticket_assignments"):
+        q(f"DELETE FROM {tbl} WHERE ticket_id=CAST(:t AS uuid)", t=tid)
+    q("DELETE FROM tickets WHERE id=CAST(:t AS uuid)", t=tid)
+    for k in keys:  # best effort: remove the files too (needs s3:DeleteObject, ignored if not allowed)
+        try:
+            s3.delete_object(Bucket=BUCKET, Key=k)
+        except Exception:
+            pass
+    return {"ok": True}
+
+
 def check_upload(u, t):
     if u["role"] == "admin" or (u["role"] == "it_support" and not can_work(u, t)):
         raise Err(403, "You cannot attach files to this ticket")
@@ -483,7 +505,10 @@ def r_notifs(u, b, qs):
 
 
 def r_notifs_read(u, b, qs):
-    q("UPDATE notifications SET is_read=TRUE WHERE user_id=CAST(:u AS uuid) AND is_read=FALSE", u=u["id"])
+    if is_uuid(b.get("id")):  # opening one notification marks just that one as read
+        q("UPDATE notifications SET is_read=TRUE WHERE user_id=CAST(:u AS uuid) AND id=CAST(:i AS uuid)", u=u["id"], i=b["id"])
+    else:
+        q("UPDATE notifications SET is_read=TRUE WHERE user_id=CAST(:u AS uuid) AND is_read=FALSE", u=u["id"])
     return {"ok": True}
 
 
@@ -588,6 +613,7 @@ ROUTES = [
     ("POST", r"/api/categories/([\w-]+)/toggle", r_cat_toggle),
     ("GET", r"/api/tickets", r_tickets), ("POST", r"/api/tickets", r_ticket_new),
     ("GET", r"/api/tickets/([\w-]+)", r_ticket_get), ("PATCH", r"/api/tickets/([\w-]+)", r_ticket_patch),
+    ("DELETE", r"/api/tickets/([\w-]+)", r_ticket_delete),
     ("POST", r"/api/tickets/([\w-]+)/messages", r_msg_add),
     ("POST", r"/api/tickets/([\w-]+)/attachments/presign", r_presign),
     ("POST", r"/api/tickets/([\w-]+)/attachments", r_attach_save),
