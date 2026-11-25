@@ -42,10 +42,10 @@ const STATUSES=["Open","Pending","In Progress","Resolved","Closed"], PRIOS=["Low
 const ROLE={employee:"Employee",it_support:"IT Support",admin:"IT Administrator"};
 const TITLE={employee:"Employee Dashboard",it_support:"IT Support Dashboard",admin:"Administrator Dashboard"};
 const NAV={
- employee:[["#/dashboard","Dashboard"],["#/tickets/all","My tickets"],["#/new","New ticket"],["#/notifications","Notifications"]],
+ employee:[["#/dashboard","Dashboard"],["#/new","New ticket"],["#/notifications","Notifications"]],
  it_support:[["#/dashboard","Dashboard"],["#/tickets/available","Available tickets"],["#/tickets/mine","My assigned"],["#/tickets/all","All tickets"],["#/notifications","Notifications"]],
  admin:[["#/dashboard","Dashboard"],["#/users","Users and roles"],["#/tickets/all","All tickets"],["#/activity","IT activity"],["#/categories","Categories"]]};
-const OK={employee:["dashboard","tickets","new","ticket","notifications"],it_support:["dashboard","tickets","ticket","notifications"],admin:["dashboard","users","tickets","ticket","activity","categories"]};
+const OK={employee:["dashboard","new","ticket","notifications"],it_support:["dashboard","tickets","ticket","notifications"],admin:["dashboard","users","tickets","ticket","activity","categories"]};
 let S={me:null,cats:[]}, VIEW="all"; const F={q:"",status:"",priority:"",category:"",sort:"newest"};
 const $=s=>document.querySelector(s);
 const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -141,10 +141,11 @@ const actTable=a=>a.length?`<div class="panel table-responsive"><table class="ta
 
 /* ---------- Dashboards ---------- */
 async function vEmpDash(){
-  const [st,ts]=await Promise.all([api("/api/stats"),api("/api/tickets?sort=newest")]), b=st.by_status;
+  VIEW="all";
+  const [st,ts]=await Promise.all([api("/api/stats"),fetchTickets()]), b=st.by_status;
   $("#view").innerHTML=`<div class="d-flex justify-content-between mb-3"><h2 class="h4">${TITLE.employee}</h2><a class="btn btn-main" href="#/new">New ticket</a></div>`+
    cards([["My tickets",st.total],["Open",b.Open||0],["In Progress",b["In Progress"]||0],["Pending",b.Pending||0],["Resolved or closed",(b.Resolved||0)+(b.Closed||0)]])+
-   `<h3 class="h5">Recent tickets</h3>`+table(ts.slice(0,6));
+   `<h3 class="h5">My tickets</h3>`+ctl()+table(ts);
 }
 async function vItDash(){
   const [st,av,mi]=await Promise.all([api("/api/stats"),api("/api/tickets?view=available&sort=priority"),api("/api/tickets?view=mine&sort=priority")]), b=st.by_status;
@@ -162,45 +163,57 @@ async function vAdminDash(){
 
 /* ---------- Ticket list with search, filter, sort ---------- */
 const VT={all:"All tickets",available:"Available tickets",mine:"My assigned tickets"};
-async function vList(view){
-  if(view!==undefined&&view!==VIEW){VIEW=view;Object.assign(F,{q:"",status:"",priority:"",category:"",sort:"newest"})}
-  const qs=new URLSearchParams({view:VIEW}); for(const k in F) if(F[k]) qs.set(k,F[k]);
-  const ts=await api("/api/tickets?"+qs);
-  const title=S.me.role==="employee"?"My tickets":VT[VIEW]||"Tickets";
-  $("#view").innerHTML=`<h2 class="h4 mb-3">${title}</h2><div class="row g-2 mb-3">
+function ctl(){return `<div class="row g-2 mb-3">
    <div class="col-md-4"><input id="fq" class="form-control" placeholder="Search title or ticket ID" value="${esc(F.q)}" onkeydown="if(event.key==='Enter')applyF()"></div>
    <div class="col-6 col-md-2"><select id="fs" class="form-select" onchange="applyF()"><option value="">All statuses</option>${opts(STATUSES,F.status)}</select></div>
    <div class="col-6 col-md-2"><select id="fp" class="form-select" onchange="applyF()"><option value="">All priorities</option>${opts(PRIOS,F.priority)}</select></div>
    <div class="col-6 col-md-2"><select id="fc" class="form-select" onchange="applyF()"><option value="">All categories</option>${S.cats.map(c=>`<option value="${c.id}" ${c.id===F.category?"selected":""}>${esc(c.name)}</option>`).join("")}</select></div>
-   <div class="col-6 col-md-2"><select id="fo" class="form-select" onchange="applyF()">${[["newest","Newest first"],["oldest","Oldest first"],["priority","Priority"],["status","Status"],["updated","Recently updated"]].map(o=>`<option value="${o[0]}" ${o[0]===F.sort?"selected":""}>${o[1]}</option>`).join("")}</select></div>
-  </div>`+table(ts);
+   <div class="col-6 col-md-2"><select id="fo" class="form-select" onchange="applyF()">${[["newest","Newest first"],["oldest","Oldest first"],["priority","Priority"],["status","Status"],["updated","Recently updated"]].map(o=>`<option value="${o[0]}" ${o[0]===F.sort?"selected":""}>${o[1]}</option>`).join("")}</select></div></div>`}
+async function fetchTickets(){const qs=new URLSearchParams({view:VIEW}); for(const k in F) if(F[k]) qs.set(k,F[k]); return api("/api/tickets?"+qs)}
+async function vList(view){
+  if(view!==undefined&&view!==VIEW){VIEW=view;Object.assign(F,{q:"",status:"",priority:"",category:"",sort:"newest"})}
+  const ts=await fetchTickets();
+  $("#view").innerHTML=`<h2 class="h4 mb-3">${VT[VIEW]||"Tickets"}</h2>`+ctl()+table(ts);
 }
-function applyF(){F.q=$("#fq").value.trim();F.status=$("#fs").value;F.priority=$("#fp").value;F.category=$("#fc").value;F.sort=$("#fo").value;vList()}
+function applyF(){F.q=$("#fq").value.trim();F.status=$("#fs").value;F.priority=$("#fp").value;F.category=$("#fc").value;F.sort=$("#fo").value;(S.me.role==="employee"&&(location.hash||"#/dashboard")==="#/dashboard")?vEmpDash():vList()}
 
 /* ---------- New ticket (employee) ---------- */
+let PENDING=[];
+function pickFiles(inp){
+  for(const f of inp.files){
+    if(f.size>5*1024*1024){flash(f.name+" is larger than 5 MB, so it was not added.");continue}
+    if(!PENDING.some(x=>x.name===f.name&&x.size===f.size))PENDING.push(f);
+  }
+  inp.value="";showFiles();
+}
+function showFiles(){$("#fl-list").innerHTML=PENDING.map((f,i)=>`<div class="d-flex justify-content-between align-items-center border rounded px-2 py-1 mb-1 bg-white small"><span>${esc(f.name)} <span class="text-secondary">(${Math.ceil(f.size/1024)} KB)</span></span><button type="button" class="btn btn-sm btn-outline-danger" onclick="dropFile(${i})">Remove</button></div>`).join("")}
+function dropFile(i){PENDING.splice(i,1);showFiles()}
 function vNew(){
+  PENDING=[];
   $("#view").innerHTML=`<h2 class="h4 mb-3">Submit an IT support request</h2><form class="panel p-4" onsubmit="return mkTicket(event)">
    <label class="form-label">Title</label><input id="sj" class="form-control mb-3" maxlength="200" required>
    <div class="row"><div class="col-md-6 mb-3"><label class="form-label">Category</label><select id="ct" class="form-select">${S.cats.filter(c=>c.is_active).map(c=>`<option value="${c.id}">${esc(c.name)}</option>`).join("")}</select></div>
    <div class="col-md-6 mb-3"><label class="form-label">Priority</label><select id="pr" class="form-select">${opts(PRIOS,"Medium")}</select></div></div>
    <label class="form-label">Description</label><textarea id="ds" class="form-control mb-3" rows="5" required></textarea>
-   <label class="form-label">Screenshots, images or documents (optional, up to 5 MB each)</label><input id="fl" type="file" multiple class="form-control mb-3">
+   <label class="form-label">Screenshots, images or documents (optional, up to 5 MB each)</label><input id="fl" type="file" multiple class="form-control mb-2" onchange="pickFiles(this)"><div id="fl-list" class="mb-3"></div>
    <button class="btn btn-main" id="sb">Submit ticket</button></form>`;
 }
 async function mkTicket(e){
-  e.preventDefault();$("#sb").disabled=true;
-  try{
-    const t=await api("/api/tickets",{method:"POST",body:{subject:$("#sj").value,description:$("#ds").value,category_id:$("#ct").value,priority:$("#pr").value}});
-    for(const f of $("#fl").files)await upload(t.id,f);
-    location.hash="#/ticket/"+t.id;
-  }catch(x){flash(x.message);$("#sb").disabled=false}
-  return false;
+  e.preventDefault();$("#sb").disabled=true;let t;
+  try{t=await api("/api/tickets",{method:"POST",body:{subject:$("#sj").value,description:$("#ds").value,category_id:$("#ct").value,priority:$("#pr").value}})}
+  catch(x){flash(x.message);$("#sb").disabled=false;return false}
+  try{for(const f of PENDING)await upload(t.id,f)}
+  catch(x){try{await api("/api/tickets/"+t.id,{method:"DELETE"})}catch(_){}  // undo: nothing is submitted if a file fails
+    flash("Your ticket was NOT submitted because a file could not be uploaded. "+x.message);$("#sb").disabled=false;return false}
+  location.hash="#/ticket/"+t.id;return false;
 }
 async function upload(tid,f){
   const ct=f.type||"application/octet-stream";
   const p=await api(`/api/tickets/${tid}/attachments/presign`,{method:"POST",body:{file_name:f.name,content_type:ct,size:f.size}});
-  const r=await fetch(p.upload_url,{method:"PUT",headers:{"Content-Type":ct},body:f});
-  if(!r.ok)throw new Error("Upload to storage failed for "+f.name);
+  let r;try{r=await fetch(p.upload_url,{method:"PUT",headers:{"Content-Type":ct},body:f})}
+  catch(e){let host="";try{host=new URL(p.upload_url).host}catch(_){}
+    throw new Error("Could not reach file storage ("+host+") for "+f.name+". Check the files bucket: its name, Region (Singapore) and CORS settings.")}
+  if(!r.ok)throw new Error("File storage refused "+f.name+" (HTTP "+r.status+").");
   await api(`/api/tickets/${tid}/attachments`,{method:"POST",body:p});
 }
 
@@ -208,7 +221,7 @@ async function upload(tid,f){
 async function vTicket(id){
   const d=await api("/api/tickets/"+id), t=d.ticket, r=S.me.role, staff=r!=="employee"?await api("/api/staff"):[];
   const canWork=r==="it_support"&&(!t.assigned_to||t.assigned_to===S.me.id), canAssign=r==="admin"||canWork, canUpload=r==="employee"||canWork, canReply=r==="employee"||canWork;
-  $("#view").innerHTML=`<a href="#/tickets/all">&larr; Back to tickets</a>
+  $("#view").innerHTML=`<a href="${r==="employee"?"#/dashboard":"#/tickets/all"}">&larr; Back</a>
   <div class="d-flex flex-wrap gap-2 align-items-center my-2"><h2 class="h4 mb-0">${esc(t.subject)}</h2>${pb(t.priority)}${sb(t.status)}</div>
   <p class="text-secondary">${sid(t.id)} &bull; ${esc(t.category)} &bull; submitted by ${esc(t.created_by_name)} on ${fmt(t.created_at)}</p>
   <div class="row g-3"><div class="col-lg-8">
@@ -228,12 +241,14 @@ async function vTicket(id){
      <button class="btn btn-sm btn-outline-success mb-2" onclick="upd('${t.id}',{status:'Resolved'})">Mark as resolved</button>`:""}
     ${canAssign?`<label class="form-label small">Assign to</label><select class="form-select" onchange="upd('${t.id}',{assigned_to:this.value})"><option value="">Unassigned</option>${staff.map(s=>`<option value="${s.id}" ${s.id===t.assigned_to?"selected":""}>${esc(s.full_name)}${s.id===S.me.id?" (me)":""}</option>`).join("")}</select>`:""}
     ${r==="employee"?(t.status==="Resolved"||t.status==="Closed"?`<button class="btn btn-sm btn-outline-secondary" onclick="upd('${t.id}',{status:'Open'})">Reopen</button> `:"")+(t.status!=="Closed"?`<button class="btn btn-sm btn-outline-secondary" onclick="upd('${t.id}',{status:'Closed'})">Close ticket</button>`:""):""}
+    ${r==="employee"&&t.status==="Open"&&!t.assigned_to?`<button class="btn btn-sm btn-outline-danger mt-2" onclick="cancelTicket('${t.id}')">Delete ticket</button>`:""}
    </div>
    <div class="panel p-3"><h3 class="h6">Attachments</h3>
     ${d.attachments.map(a=>`<div class="small mb-1"><a href="${a.url}" target="_blank" rel="noopener">${esc(a.file_name)}</a> <span class="text-secondary">${Math.ceil(a.size_bytes/1024)} KB, ${esc(a.uploader)}</span></div>`).join("")||'<p class="small text-secondary">No files attached.</p>'}
     ${canUpload?`<input id="af" type="file" class="form-control form-control-sm mt-2"><button class="btn btn-sm btn-outline-secondary mt-2" onclick="addFile('${t.id}')">Upload file</button>`:""}
    </div></div></div>`;
 }
+async function cancelTicket(id){if(!confirm("Delete this ticket? This cannot be undone."))return;try{await api("/api/tickets/"+id,{method:"DELETE"});location.hash="#/dashboard"}catch(e){flash(e.message)}}
 async function sendMsg(id){const b=$("#mb").value.trim();if(!b)return;try{await api(`/api/tickets/${id}/messages`,{method:"POST",body:{body:b,internal:!!($("#inl")&&$("#inl").checked)}});await vTicket(id)}catch(e){flash(e.message)}}
 async function upd(id,body){try{await api("/api/tickets/"+id,{method:"PATCH",body});await vTicket(id)}catch(e){await vTicket(id);flash(e.message)}}
 async function addFile(id){const f=$("#af").files[0];if(!f)return flash("Choose a file first");try{await upload(id,f);await vTicket(id)}catch(e){flash(e.message)}}
@@ -242,8 +257,9 @@ async function addFile(id){const f=$("#af").files[0];if(!f)return flash("Choose 
 async function vNotifs(){
   const n=await api("/api/notifications");
   $("#view").innerHTML=`<div class="d-flex justify-content-between mb-3"><h2 class="h4">Notifications</h2><button class="btn btn-sm btn-outline-secondary" onclick="readAll()">Mark all as read</button></div>`+
-  (n.items.length?`<div class="panel"><ul class="list-group list-group-flush">`+n.items.map(i=>`<li class="list-group-item ${i.is_read?"":"fw-bold"} click" style="cursor:pointer" onclick="location.hash='#/ticket/${i.ticket_id}'">${esc(i.message)}<div class="small text-secondary fw-normal">${fmt(i.created_at)}</div></li>`).join("")+`</ul></div>`:`<div class="panel p-4 text-secondary">No notifications yet.</div>`);
+  (n.items.length?`<div class="panel"><ul class="list-group list-group-flush">`+n.items.map(i=>`<li class="list-group-item ${i.is_read?"":"fw-bold"} click" style="cursor:pointer" onclick="openNotif('${i.id}','${i.ticket_id}')">${esc(i.message)}<div class="small text-secondary fw-normal">${fmt(i.created_at)}</div></li>`).join("")+`</ul></div>`:`<div class="panel p-4 text-secondary">No notifications yet.</div>`);
 }
+async function openNotif(id,tid){try{await api("/api/notifications/read",{method:"POST",body:{id}})}catch(e){}location.hash="#/ticket/"+tid}
 async function readAll(){await api("/api/notifications/read",{method:"POST",body:{}});await vNotifs();badge()}
 
 /* ---------- Administrator pages ---------- */
