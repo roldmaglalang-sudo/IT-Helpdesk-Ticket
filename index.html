@@ -6,20 +6,24 @@
 <title>IT Helpdesk</title>
 <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
 <style>
-  :root{--ink:#16232e;--paper:#f2f4f3;--line:#d9dfdc;--accent:#17614f;}
+  :root{--ink:#16232e;--paper:#f2f4f3;--line:#d9dfdc;--accent:#17614f;--side:#16232e}
+  body.role-employee{--accent:#0f766e;--side:#0b2f2c}
+  body.role-it_support{--accent:#1d4ed8;--side:#12254a}
+  body.role-admin{--accent:#6d28d9;--side:#2b1b4d}
   body{background:var(--paper);color:var(--ink);font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
-  .side{background:var(--ink);min-height:100vh}
-  .side a{color:#c9d6d1;text-decoration:none;display:block;padding:.55rem 1rem;border-radius:6px}
-  .side a:hover,.side a.on{background:#243746;color:#fff}
-  .brand{color:#fff;font-weight:700;font-size:1.15rem;padding:1rem}
-  .btn-main{background:var(--accent);color:#fff;border:0}.btn-main:hover{background:#115040;color:#fff}
+  .side{background:var(--side);min-height:100vh}
+  .side a{color:#cfd9e3;text-decoration:none;display:flex;justify-content:space-between;padding:.55rem 1rem;border-radius:6px}
+  .side a:hover,.side a.on{background:rgba(255,255,255,.14);color:#fff}
+  .brand{color:#fff;font-weight:700;font-size:1.15rem;padding:1rem 1rem .2rem}
+  .chip{display:inline-block;margin:0 1rem 1rem;padding:.1rem .6rem;border-radius:20px;background:var(--accent);color:#fff;font-size:.75rem}
+  .btn-main{background:var(--accent);color:#fff;border:0}.btn-main:hover{filter:brightness(.88);color:#fff}
   .panel{background:#fff;border:1px solid var(--line);border-radius:8px}
-  .stat{background:#fff;border:1px solid var(--line);border-radius:8px;padding:.9rem 1rem;border-left:4px solid var(--accent)}
+  .stat{background:#fff;border:1px solid var(--line);border-radius:8px;padding:.9rem 1rem;border-left:4px solid var(--accent);height:100%}
   .stat .n{font-size:1.9rem;font-weight:700;line-height:1}
   .b-Low{background:#6c7a89}.b-Medium{background:#2f6fa5}.b-High{background:#c47a12}.b-Critical{background:#b3261e}
-  .s-Open{background:#2f6fa5}.s-In-Progress{background:#7a4fb5}.s-Pending{background:#c47a12}.s-Resolved{background:#17614f}.s-Closed{background:#6c7a89}
-  .msg{border-left:3px solid var(--line);padding:.4rem .8rem;margin-bottom:.8rem;white-space:pre-wrap}
-  .msg.staff{border-color:var(--accent)} .msg.sys{color:#5b6b78;font-size:.88rem;border-style:dashed}
+  .s-Open{background:#2f6fa5}.s-In-Progress{background:#7a4fb5}.s-Pending{background:#c47a12}.s-Resolved{background:#17714f}.s-Closed{background:#6c7a89}
+  .msg{border-left:3px solid var(--line);padding:.4rem .8rem;margin-bottom:.8rem;white-space:pre-wrap;background:#fff}
+  .msg.staff{border-color:var(--accent)} .msg.internal{border-color:#c47a12;background:#fff8e6}
   tr.click{cursor:pointer} :focus-visible{outline:3px solid #f0b429;outline-offset:2px}
   @media(max-width:767px){.side{min-height:0}}
 </style>
@@ -34,9 +38,15 @@ const CFG = {
   CLIENT_ID: "4v6r1rk83koo32pptssq0svhmb"
 };
 /* ============================================================== */
-const STATUSES=["Open","In Progress","Pending","Resolved","Closed"], PRIOS=["Low","Medium","High","Critical"];
-const ROLE={employee:"Employee",it_support:"IT Support",admin:"Administrator"};
-let S={me:null,cats:[]};
+const STATUSES=["Open","Pending","In Progress","Resolved","Closed"], PRIOS=["Low","Medium","High","Critical"];
+const ROLE={employee:"Employee",it_support:"IT Support",admin:"IT Administrator"};
+const TITLE={employee:"Employee Dashboard",it_support:"IT Support Dashboard",admin:"Administrator Dashboard"};
+const NAV={
+ employee:[["#/dashboard","Dashboard"],["#/tickets/all","My tickets"],["#/new","New ticket"],["#/notifications","Notifications"]],
+ it_support:[["#/dashboard","Dashboard"],["#/tickets/available","Available tickets"],["#/tickets/mine","My assigned"],["#/tickets/all","All tickets"],["#/notifications","Notifications"]],
+ admin:[["#/dashboard","Dashboard"],["#/users","Users and roles"],["#/tickets/all","All tickets"],["#/activity","IT activity"],["#/categories","Categories"]]};
+const OK={employee:["dashboard","tickets","new","ticket","notifications"],it_support:["dashboard","tickets","ticket","notifications"],admin:["dashboard","users","tickets","ticket","activity","categories"]};
+let S={me:null,cats:[]}, VIEW="all"; const F={q:"",status:"",priority:"",category:"",sort:"newest"};
 const $=s=>document.querySelector(s);
 const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const fmt=d=>d?new Date(String(d).replace(" ","T")).toLocaleString():"";
@@ -44,6 +54,7 @@ const sid=id=>"TKT-"+String(id).slice(0,8).toUpperCase();
 const pb=p=>`<span class="badge b-${p}">${p}</span>`, sb=s=>`<span class="badge s-${s.replace(" ","-")}">${s}</span>`;
 const opts=(arr,sel)=>arr.map(a=>`<option ${a===sel?"selected":""}>${a}</option>`).join("");
 const flash=(m,ok)=>{const e=$("#flash");if(e){e.className="alert alert-"+(ok?"success":"danger");e.textContent=m;e.classList.remove("d-none");scrollTo(0,0)}};
+const cards=a=>`<div class="row g-3 mb-4">${a.map(x=>`<div class="col-6 col-md-3 col-xl"><div class="stat"><div class="n">${x[1]}</div>${x[0]}</div></div>`).join("")}</div>`;
 
 /* ---------- Cognito (direct API calls, no library) ---------- */
 async function cog(target,body){
@@ -53,7 +64,7 @@ async function cog(target,body){
 }
 const keep=r=>{sessionStorage.setItem("at",r.AccessToken); if(r.RefreshToken) sessionStorage.setItem("rt",r.RefreshToken)};
 async function refresh(){const j=await cog("InitiateAuth",{AuthFlow:"REFRESH_TOKEN_AUTH",ClientId:CFG.CLIENT_ID,AuthParameters:{REFRESH_TOKEN:sessionStorage.getItem("rt")}});keep(j.AuthenticationResult)}
-function logout(){sessionStorage.clear();S.me=null;location.hash="";showAuth()}
+function logout(){sessionStorage.clear();S.me=null;document.body.className="";location.hash="";showAuth()}
 
 /* ---------- API ---------- */
 async function api(path,o={},retry=true){
@@ -89,60 +100,91 @@ function showAuth(mode="login",msg=""){
     <button class="btn btn-main w-100">Verify email</button></form>`}
   </div></div>`;
 }
-async function doLogin(e){e.preventDefault();try{const j=await cog("InitiateAuth",{AuthFlow:"USER_PASSWORD_AUTH",ClientId:CFG.CLIENT_ID,AuthParameters:{USERNAME:$("#em").value.trim(),PASSWORD:$("#pw").value}});keep(j.AuthenticationResult);await start()}catch(x){flash(x.message)}return false}
+async function doLogin(e){e.preventDefault();try{const j=await cog("InitiateAuth",{AuthFlow:"USER_PASSWORD_AUTH",ClientId:CFG.CLIENT_ID,AuthParameters:{USERNAME:$("#em").value.trim(),PASSWORD:$("#pw").value}});keep(j.AuthenticationResult);location.hash="#/dashboard";await start()}catch(x){flash(x.message)}return false}
 async function doReg(e){e.preventDefault();const em=$("#em").value.trim();try{await cog("SignUp",{ClientId:CFG.CLIENT_ID,Username:em,Password:$("#pw").value,UserAttributes:[{Name:"email",Value:em},{Name:"name",Value:$("#nm").value.trim()}]});sessionStorage.setItem("pend",em);showAuth("confirm")}catch(x){flash(x.message)}return false}
 async function doConfirm(e){e.preventDefault();try{await cog("ConfirmSignUp",{ClientId:CFG.CLIENT_ID,Username:sessionStorage.getItem("pend"),ConfirmationCode:$("#cd").value.trim()});showAuth("login","Email verified. You can sign in now.")}catch(x){flash(x.message)}return false}
 
-/* ---------- Shell + router ---------- */
+/* ---------- Shell + router (each role gets its own dashboard and menu) ---------- */
 async function start(){
   try{S.me=await api("/api/me");S.cats=await api("/api/categories")}catch(e){return showAuth("login",sessionStorage.getItem("at")?e.message:"")}
-  const r=S.me.role, L=[["#/dashboard","Dashboard"],["#/tickets",r==="employee"?"My tickets":r==="it_support"?"Assigned tickets":"All tickets"]];
-  if(r==="employee"||r==="admin")L.push(["#/new","New ticket"]);
-  if(r==="admin")L.push(["#/users","Users"],["#/categories","Categories"]);
+  const r=S.me.role; document.body.className="role-"+r;
   $("#app").innerHTML=`<div class="container-fluid"><div class="row">
-   <nav class="col-md-2 side p-2" id="nav"><div class="brand">IT Helpdesk</div>${L.map(l=>`<a href="${l[0]}">${l[1]}</a>`).join("")}
-     <div class="px-3 pt-4 small text-light">${esc(S.me.full_name)}<br><span class="text-secondary">${ROLE[r]}</span></div>
+   <nav class="col-md-2 side p-2" id="nav"><div class="brand">IT Helpdesk</div><span class="chip">${ROLE[r]}</span>
+     ${NAV[r].map(l=>`<a href="${l[0]}"><span>${l[1]}</span>${l[1]==="Notifications"?'<span id="nb" class="badge bg-danger d-none"></span>':""}</a>`).join("")}
+     <div class="px-3 pt-4 small text-light">${esc(S.me.full_name)}<br><span class="text-secondary">${esc(S.me.email)}</span></div>
      <a href="#" onclick="logout();return false" class="mt-2">Sign out</a></nav>
    <main class="col-md-10 p-4"><div id="flash" class="alert d-none"></div><div id="view"></div></main></div></div>`;
   if(!location.hash||location.hash==="#")location.hash="#/dashboard"; route();
 }
 async function route(){
-  if(!S.me)return; const h=location.hash||"#/dashboard", m=h.split("/");
+  if(!S.me)return; const h=location.hash||"#/dashboard", m=h.split("/"), p=m[1]||"dashboard";
+  if(!OK[S.me.role].includes(p)){location.hash="#/dashboard";return}
   document.querySelectorAll("#nav a").forEach(a=>a.classList.toggle("on",a.getAttribute("href")===h));
-  $("#flash").classList.add("d-none");
+  $("#flash").classList.add("d-none"); badge();
   try{
-    if(m[1]==="tickets")await vList(); else if(m[1]==="new")vNew(); else if(m[1]==="ticket")await vTicket(m[2]);
-    else if(m[1]==="users"&&S.me.role==="admin")await vUsers(); else if(m[1]==="categories"&&S.me.role==="admin")await vCats(); else await vDash();
+    if(p==="tickets")await vList(m[2]||"all"); else if(p==="new")vNew(); else if(p==="ticket")await vTicket(m[2]);
+    else if(p==="notifications")await vNotifs(); else if(p==="users")await vUsers(); else if(p==="activity")await vActivity();
+    else if(p==="categories")await vCats(); else await({employee:vEmpDash,it_support:vItDash,admin:vAdminDash})[S.me.role]();
   }catch(e){flash(e.message)}
 }
 addEventListener("hashchange",route);
+async function badge(){if(S.me.role==="admin")return;try{const n=(await api("/api/notifications")).unread,b=$("#nb");if(b){b.textContent=n;b.classList.toggle("d-none",!n)}}catch(e){}}
 
-/* ---------- Views ---------- */
+/* ---------- Tables ---------- */
 function table(rows){
   if(!rows.length)return `<div class="panel p-4 text-secondary">No tickets here yet.</div>`;
-  return `<div class="panel table-responsive"><table class="table table-hover mb-0 align-middle"><thead><tr><th>ID</th><th>Subject</th><th>Category</th><th>Priority</th><th>Status</th><th>Assigned to</th><th>Created</th></tr></thead><tbody>`+
-  rows.map(t=>`<tr class="click" onclick="location.hash='#/ticket/${t.id}'"><td>${sid(t.id)}</td><td>${esc(t.subject)}</td><td>${esc(t.category)}</td><td>${pb(t.priority)}</td><td>${sb(t.status)}</td><td>${esc(t.assigned_name||"Unassigned")}</td><td>${fmt(t.created_at)}</td></tr>`).join("")+`</tbody></table></div>`;
+  return `<div class="panel table-responsive"><table class="table table-hover mb-0 align-middle"><thead><tr><th>ID</th><th>Title</th><th>Category</th><th>Priority</th><th>Status</th><th>Submitted by</th><th>Assigned to</th><th>Created</th></tr></thead><tbody>`+
+  rows.map(t=>`<tr class="click" onclick="location.hash='#/ticket/${t.id}'"><td>${sid(t.id)}</td><td>${esc(t.subject)}</td><td>${esc(t.category)}</td><td>${pb(t.priority)}</td><td>${sb(t.status)}</td><td>${esc(t.created_by_name)}</td><td>${esc(t.assigned_name||"Unassigned")}</td><td>${fmt(t.created_at)}</td></tr>`).join("")+`</tbody></table></div>`;
 }
-async function vDash(){
-  const [st,ts]=await Promise.all([api("/api/stats"),api("/api/tickets")]);
-  $("#view").innerHTML=`<h2 class="h4 mb-3">Dashboard</h2><div class="row g-3 mb-4">
-   <div class="col-6 col-md"><div class="stat"><div class="n">${st.total}</div>Total tickets</div></div>`+
-   STATUSES.map(s=>`<div class="col-6 col-md"><div class="stat"><div class="n">${st.by_status[s]||0}</div>${s}</div></div>`).join("")+`</div>`+
-   (st.users?`<p class="text-secondary">Users: ${st.users.employee||0} employees, ${st.users.it_support||0} IT support, ${st.users.admin||0} administrators.</p>`:"")+
-   `<h3 class="h5">Recent tickets</h3>`+table(ts.slice(0,8));
+const actTable=a=>a.length?`<div class="panel table-responsive"><table class="table mb-0 align-middle"><thead><tr><th>When</th><th>IT support</th><th>Ticket</th><th>Action</th></tr></thead><tbody>`+
+  a.map(x=>`<tr class="click" onclick="location.hash='#/ticket/${x.ticket_id}'"><td>${fmt(x.created_at)}</td><td>${esc(x.actor)}</td><td>${sid(x.ticket_id)} ${esc(x.subject)}</td><td>${esc(x.details)}</td></tr>`).join("")+`</tbody></table></div>`:`<div class="panel p-4 text-secondary">No IT activity yet.</div>`;
+
+/* ---------- Dashboards ---------- */
+async function vEmpDash(){
+  const [st,ts]=await Promise.all([api("/api/stats"),api("/api/tickets?sort=newest")]), b=st.by_status;
+  $("#view").innerHTML=`<div class="d-flex justify-content-between mb-3"><h2 class="h4">${TITLE.employee}</h2><a class="btn btn-main" href="#/new">New ticket</a></div>`+
+   cards([["My tickets",st.total],["Open",b.Open||0],["In Progress",b["In Progress"]||0],["Pending",b.Pending||0],["Resolved or closed",(b.Resolved||0)+(b.Closed||0)]])+
+   `<h3 class="h5">Recent tickets</h3>`+table(ts.slice(0,6));
 }
-async function vList(f=""){
-  const ts=await api("/api/tickets"+(f?"?status="+encodeURIComponent(f):""));
-  $("#view").innerHTML=`<div class="d-flex justify-content-between mb-3"><h2 class="h4">Tickets</h2>
-   <select class="form-select w-auto" onchange="vList(this.value)"><option value="">All statuses</option>${opts(STATUSES,f)}</select></div>`+table(ts);
+async function vItDash(){
+  const [st,av,mi]=await Promise.all([api("/api/stats"),api("/api/tickets?view=available&sort=priority"),api("/api/tickets?view=mine&sort=priority")]), b=st.by_status;
+  $("#view").innerHTML=`<h2 class="h4 mb-3">${TITLE.it_support}</h2>`+
+   cards([["Available to pick up",st.available],["Assigned to me",st.mine],["Open",b.Open||0],["Pending",b.Pending||0],["In Progress",b["In Progress"]||0],["Resolved",b.Resolved||0]])+
+   `<h3 class="h5">Available tickets</h3>`+table(av.slice(0,6))+`<h3 class="h5 mt-4">Assigned to me</h3>`+table(mi.filter(t=>!["Resolved","Closed"].includes(t.status)).slice(0,6));
 }
+async function vAdminDash(){
+  const [st,ts,ac]=await Promise.all([api("/api/stats"),api("/api/tickets?sort=newest"),api("/api/activity")]), b=st.by_status, u=st.users||{};
+  $("#view").innerHTML=`<h2 class="h4 mb-3">${TITLE.admin}</h2>`+
+   cards([["Employees",u.employee||0],["IT support staff",u.it_support||0],["Total tickets",st.total]])+
+   cards([["Open",b.Open||0],["Pending",b.Pending||0],["In Progress",b["In Progress"]||0],["Resolved",b.Resolved||0],["Closed",b.Closed||0]])+
+   `<h3 class="h5">Latest IT activity</h3>`+actTable(ac.slice(0,8))+`<h3 class="h5 mt-4">Latest tickets</h3>`+table(ts.slice(0,6));
+}
+
+/* ---------- Ticket list with search, filter, sort ---------- */
+const VT={all:"All tickets",available:"Available tickets",mine:"My assigned tickets"};
+async function vList(view){
+  if(view!==undefined&&view!==VIEW){VIEW=view;Object.assign(F,{q:"",status:"",priority:"",category:"",sort:"newest"})}
+  const qs=new URLSearchParams({view:VIEW}); for(const k in F) if(F[k]) qs.set(k,F[k]);
+  const ts=await api("/api/tickets?"+qs);
+  const title=S.me.role==="employee"?"My tickets":VT[VIEW]||"Tickets";
+  $("#view").innerHTML=`<h2 class="h4 mb-3">${title}</h2><div class="row g-2 mb-3">
+   <div class="col-md-4"><input id="fq" class="form-control" placeholder="Search title or ticket ID" value="${esc(F.q)}" onkeydown="if(event.key==='Enter')applyF()"></div>
+   <div class="col-6 col-md-2"><select id="fs" class="form-select" onchange="applyF()"><option value="">All statuses</option>${opts(STATUSES,F.status)}</select></div>
+   <div class="col-6 col-md-2"><select id="fp" class="form-select" onchange="applyF()"><option value="">All priorities</option>${opts(PRIOS,F.priority)}</select></div>
+   <div class="col-6 col-md-2"><select id="fc" class="form-select" onchange="applyF()"><option value="">All categories</option>${S.cats.map(c=>`<option value="${c.id}" ${c.id===F.category?"selected":""}>${esc(c.name)}</option>`).join("")}</select></div>
+   <div class="col-6 col-md-2"><select id="fo" class="form-select" onchange="applyF()">${[["newest","Newest first"],["oldest","Oldest first"],["priority","Priority"],["status","Status"],["updated","Recently updated"]].map(o=>`<option value="${o[0]}" ${o[0]===F.sort?"selected":""}>${o[1]}</option>`).join("")}</select></div>
+  </div>`+table(ts);
+}
+function applyF(){F.q=$("#fq").value.trim();F.status=$("#fs").value;F.priority=$("#fp").value;F.category=$("#fc").value;F.sort=$("#fo").value;vList()}
+
+/* ---------- New ticket (employee) ---------- */
 function vNew(){
-  $("#view").innerHTML=`<h2 class="h4 mb-3">New ticket</h2><form class="panel p-4" onsubmit="return mkTicket(event)">
-   <label class="form-label">Subject</label><input id="sj" class="form-control mb-3" maxlength="200" required>
+  $("#view").innerHTML=`<h2 class="h4 mb-3">Submit an IT support request</h2><form class="panel p-4" onsubmit="return mkTicket(event)">
+   <label class="form-label">Title</label><input id="sj" class="form-control mb-3" maxlength="200" required>
    <div class="row"><div class="col-md-6 mb-3"><label class="form-label">Category</label><select id="ct" class="form-select">${S.cats.filter(c=>c.is_active).map(c=>`<option value="${c.id}">${esc(c.name)}</option>`).join("")}</select></div>
    <div class="col-md-6 mb-3"><label class="form-label">Priority</label><select id="pr" class="form-select">${opts(PRIOS,"Medium")}</select></div></div>
-   <label class="form-label">What is happening?</label><textarea id="ds" class="form-control mb-3" rows="5" required></textarea>
-   <label class="form-label">Screenshots or documents (optional, up to 5 MB each)</label><input id="fl" type="file" multiple class="form-control mb-3">
+   <label class="form-label">Description</label><textarea id="ds" class="form-control mb-3" rows="5" required></textarea>
+   <label class="form-label">Screenshots, images or documents (optional, up to 5 MB each)</label><input id="fl" type="file" multiple class="form-control mb-3">
    <button class="btn btn-main" id="sb">Submit ticket</button></form>`;
 }
 async function mkTicket(e){
@@ -161,42 +203,70 @@ async function upload(tid,f){
   if(!r.ok)throw new Error("Upload to storage failed for "+f.name);
   await api(`/api/tickets/${tid}/attachments`,{method:"POST",body:p});
 }
+
+/* ---------- Ticket detail ---------- */
 async function vTicket(id){
-  const d=await api("/api/tickets/"+id), t=d.ticket, r=S.me.role, staff=r==="admin"?await api("/api/staff"):[];
-  const canWork=r!=="employee"&&(r==="admin"||t.assigned_to===S.me.id);
-  $("#view").innerHTML=`<a href="#/tickets">&larr; Back to tickets</a>
+  const d=await api("/api/tickets/"+id), t=d.ticket, r=S.me.role, staff=r!=="employee"?await api("/api/staff"):[];
+  const canWork=r==="it_support"&&(!t.assigned_to||t.assigned_to===S.me.id), canAssign=r==="admin"||canWork, canUpload=r==="employee"||canWork, canReply=r==="employee"||canWork;
+  $("#view").innerHTML=`<a href="#/tickets/all">&larr; Back to tickets</a>
   <div class="d-flex flex-wrap gap-2 align-items-center my-2"><h2 class="h4 mb-0">${esc(t.subject)}</h2>${pb(t.priority)}${sb(t.status)}</div>
-  <p class="text-secondary">${sid(t.id)} &bull; ${esc(t.category)} &bull; opened by ${esc(t.created_by_name)} on ${fmt(t.created_at)}</p>
+  <p class="text-secondary">${sid(t.id)} &bull; ${esc(t.category)} &bull; submitted by ${esc(t.created_by_name)} on ${fmt(t.created_at)}</p>
   <div class="row g-3"><div class="col-lg-8">
    <div class="panel p-3 mb-3"><div style="white-space:pre-wrap">${esc(t.description)}</div></div>
-   <h3 class="h6">Conversation and history</h3>
-   ${d.messages.map(m=>`<div class="msg ${m.is_system?"sys":m.sender_role!=="employee"?"staff":""}"><b>${m.is_system?"System":esc(m.sender)}</b> <span class="text-secondary small">${fmt(m.created_at)}</span><br>${esc(m.body)}</div>`).join("")||'<p class="text-secondary">No messages yet.</p>'}
-   <div class="panel p-3"><textarea id="mb" class="form-control mb-2" rows="3" placeholder="Write a reply"></textarea><button class="btn btn-main" onclick="sendMsg('${t.id}')">Send reply</button></div>
+   <h3 class="h6">Conversation</h3>
+   ${d.messages.map(m=>`<div class="msg ${m.is_internal?"internal":m.sender_role!=="employee"?"staff":""}"><b>${esc(m.sender)}</b> ${m.is_internal?'<span class="badge bg-warning text-dark">Internal note</span>':""} <span class="text-secondary small">${fmt(m.created_at)}</span><br>${esc(m.body)}</div>`).join("")||'<p class="text-secondary">No messages yet.</p>'}
+   ${r==="admin"?'<p class="small text-secondary">Administrator view: you can monitor everything here. Employees and IT support handle the replies.</p>':
+    canReply?`<div class="panel p-3"><textarea id="mb" class="form-control mb-2" rows="3" placeholder="Write a message"></textarea>
+     ${r==="it_support"?'<div class="form-check mb-2"><input id="inl" type="checkbox" class="form-check-input"><label class="form-check-label small" for="inl">Internal note (only IT support and administrators can see it)</label></div>':""}
+     <button class="btn btn-main" onclick="sendMsg('${t.id}')">Send</button></div>`:'<p class="small text-secondary">This ticket is assigned to another IT support member, so only they can reply or update it.</p>'}
+   <h3 class="h6 mt-4">Ticket history</h3>
+   <ul class="list-unstyled small">${d.logs.map(l=>`<li class="mb-1"><span class="text-secondary">${fmt(l.created_at)}</span> &bull; <b>${esc(l.actor)}</b>: ${esc(l.details)}${l.is_internal?' <span class="badge bg-warning text-dark">internal</span>':""}</li>`).join("")}</ul>
   </div><div class="col-lg-4">
    <div class="panel p-3 mb-3"><h3 class="h6">Details</h3><div class="small mb-2">Assigned to: <b>${esc(t.assigned_name||"Unassigned")}</b></div>
     ${canWork?`<label class="form-label small">Status</label><select class="form-select mb-2" onchange="upd('${t.id}',{status:this.value})">${opts(STATUSES,t.status)}</select>
      <label class="form-label small">Priority</label><select class="form-select mb-2" onchange="upd('${t.id}',{priority:this.value})">${opts(PRIOS,t.priority)}</select>
-     <button class="btn btn-sm btn-outline-success mb-2" onclick="upd('${t.id}',{status:'Resolved'})">Mark resolved</button>`:""}
-    ${r==="admin"?`<label class="form-label small">Assign to</label><select class="form-select" onchange="upd('${t.id}',{assigned_to:this.value})"><option value="">Unassigned</option>${staff.map(s=>`<option value="${s.id}" ${s.id===t.assigned_to?"selected":""}>${esc(s.full_name)} (${ROLE[s.role]})</option>`).join("")}</select>`:""}
+     <button class="btn btn-sm btn-outline-success mb-2" onclick="upd('${t.id}',{status:'Resolved'})">Mark as resolved</button>`:""}
+    ${canAssign?`<label class="form-label small">Assign to</label><select class="form-select" onchange="upd('${t.id}',{assigned_to:this.value})"><option value="">Unassigned</option>${staff.map(s=>`<option value="${s.id}" ${s.id===t.assigned_to?"selected":""}>${esc(s.full_name)}${s.id===S.me.id?" (me)":""}</option>`).join("")}</select>`:""}
     ${r==="employee"?(t.status==="Resolved"||t.status==="Closed"?`<button class="btn btn-sm btn-outline-secondary" onclick="upd('${t.id}',{status:'Open'})">Reopen</button> `:"")+(t.status!=="Closed"?`<button class="btn btn-sm btn-outline-secondary" onclick="upd('${t.id}',{status:'Closed'})">Close ticket</button>`:""):""}
    </div>
    <div class="panel p-3"><h3 class="h6">Attachments</h3>
     ${d.attachments.map(a=>`<div class="small mb-1"><a href="${a.url}" target="_blank" rel="noopener">${esc(a.file_name)}</a> <span class="text-secondary">${Math.ceil(a.size_bytes/1024)} KB, ${esc(a.uploader)}</span></div>`).join("")||'<p class="small text-secondary">No files attached.</p>'}
-    <input id="af" type="file" class="form-control form-control-sm mt-2"><button class="btn btn-sm btn-outline-secondary mt-2" onclick="addFile('${t.id}')">Upload file</button>
+    ${canUpload?`<input id="af" type="file" class="form-control form-control-sm mt-2"><button class="btn btn-sm btn-outline-secondary mt-2" onclick="addFile('${t.id}')">Upload file</button>`:""}
    </div></div></div>`;
 }
-async function sendMsg(id){const b=$("#mb").value.trim();if(!b)return;try{await api(`/api/tickets/${id}/messages`,{method:"POST",body:{body:b}});await vTicket(id)}catch(e){flash(e.message)}}
-async function upd(id,body){try{await api("/api/tickets/"+id,{method:"PATCH",body});await vTicket(id)}catch(e){flash(e.message);await vTicket(id)}}
+async function sendMsg(id){const b=$("#mb").value.trim();if(!b)return;try{await api(`/api/tickets/${id}/messages`,{method:"POST",body:{body:b,internal:!!($("#inl")&&$("#inl").checked)}});await vTicket(id)}catch(e){flash(e.message)}}
+async function upd(id,body){try{await api("/api/tickets/"+id,{method:"PATCH",body});await vTicket(id)}catch(e){await vTicket(id);flash(e.message)}}
 async function addFile(id){const f=$("#af").files[0];if(!f)return flash("Choose a file first");try{await upload(id,f);await vTicket(id)}catch(e){flash(e.message)}}
+
+/* ---------- Notifications ---------- */
+async function vNotifs(){
+  const n=await api("/api/notifications");
+  $("#view").innerHTML=`<div class="d-flex justify-content-between mb-3"><h2 class="h4">Notifications</h2><button class="btn btn-sm btn-outline-secondary" onclick="readAll()">Mark all as read</button></div>`+
+  (n.items.length?`<div class="panel"><ul class="list-group list-group-flush">`+n.items.map(i=>`<li class="list-group-item ${i.is_read?"":"fw-bold"} click" style="cursor:pointer" onclick="location.hash='#/ticket/${i.ticket_id}'">${esc(i.message)}<div class="small text-secondary fw-normal">${fmt(i.created_at)}</div></li>`).join("")+`</ul></div>`:`<div class="panel p-4 text-secondary">No notifications yet.</div>`);
+}
+async function readAll(){await api("/api/notifications/read",{method:"POST",body:{}});await vNotifs();badge()}
+
+/* ---------- Administrator pages ---------- */
+async function vActivity(){$("#view").innerHTML=`<h2 class="h4 mb-3">IT support activity</h2><p class="text-secondary">The latest actions by IT support staff: assignments, status changes, replies and notes.</p>`+actTable(await api("/api/activity"))}
 async function vUsers(){
   const us=await api("/api/users");
-  $("#view").innerHTML=`<h2 class="h4 mb-3">Users</h2><p class="text-secondary">New people register themselves. They start as Employee. Change their role here.</p>
-  <div class="panel table-responsive"><table class="table mb-0 align-middle"><thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Active</th></tr></thead><tbody>`+
+  $("#view").innerHTML=`<h2 class="h4 mb-3">Users and roles</h2>
+  <form class="panel p-3 mb-3" onsubmit="return mkUser(event)"><h3 class="h6">Create an account</h3><div class="row g-2">
+   <div class="col-md-3"><input id="un" class="form-control" placeholder="Full name" required></div>
+   <div class="col-md-3"><input id="ue" type="email" class="form-control" placeholder="Email" required></div>
+   <div class="col-md-2"><input id="up" type="text" class="form-control" placeholder="Password" required></div>
+   <div class="col-md-2"><select id="ur" class="form-select">${Object.keys(ROLE).map(k=>`<option value="${k}">${ROLE[k]}</option>`).join("")}</select></div>
+   <div class="col-md-2"><button class="btn btn-main w-100">Create</button></div></div>
+   <div class="form-text">Password: 8+ characters with upper and lower case, a number and a symbol. People can also register themselves and start as Employee.</div></form>
+  <div class="panel table-responsive"><table class="table mb-0 align-middle"><thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Active</th><th></th></tr></thead><tbody>`+
   us.map(u=>{const me=u.id===S.me.id;return `<tr><td>${esc(u.full_name)}</td><td>${esc(u.email)}</td>
    <td><select class="form-select form-select-sm w-auto" ${me?"disabled":""} onchange="setUser('${u.id}',{role:this.value})">${Object.keys(ROLE).map(k=>`<option value="${k}" ${k===u.role?"selected":""}>${ROLE[k]}</option>`).join("")}</select></td>
-   <td><input type="checkbox" class="form-check-input" ${u.is_active?"checked":""} ${me?"disabled":""} onchange="setUser('${u.id}',{is_active:this.checked})"></td></tr>`}).join("")+`</tbody></table></div>`;
+   <td><input type="checkbox" class="form-check-input" ${u.is_active?"checked":""} ${me?"disabled":""} onchange="setUser('${u.id}',{is_active:this.checked})"></td>
+   <td class="text-end"><button class="btn btn-sm btn-outline-danger" ${me?"disabled":""} onclick="delUser('${u.id}','${esc(u.full_name).replace(/'/g,"")}')">Delete</button></td></tr>`}).join("")+`</tbody></table></div>`;
 }
-async function setUser(id,b){try{await api("/api/users/"+id,{method:"PATCH",body:b});flash("Saved",true)}catch(e){flash(e.message)}await vUsers()}
+async function mkUser(e){e.preventDefault();try{await api("/api/users",{method:"POST",body:{full_name:$("#un").value,email:$("#ue").value,password:$("#up").value,role:$("#ur").value}});await vUsers();flash("Account created",true)}catch(x){flash(x.message)}return false}
+async function delUser(id,name){if(!confirm("Delete the account of "+name+"?\nThis cannot be undone."))return;try{await api("/api/users/"+id,{method:"DELETE"});await vUsers();flash("Account deleted",true)}catch(e){await vUsers();flash(e.message)}}
+async function setUser(id,b){try{await api("/api/users/"+id,{method:"PATCH",body:b});await vUsers();flash("Saved",true)}catch(e){await vUsers();flash(e.message)}}
 async function vCats(){
   S.cats=await api("/api/categories");
   $("#view").innerHTML=`<h2 class="h4 mb-3">Ticket categories</h2><div class="panel p-3 mb-3"><div class="input-group"><input id="cn" class="form-control" placeholder="New category name"><button class="btn btn-main" onclick="addCat()">Add category</button></div></div>
