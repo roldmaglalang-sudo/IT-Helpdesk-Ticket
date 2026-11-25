@@ -91,7 +91,7 @@ function showAuth(mode="login",msg=""){
     <label class="form-label">Full name</label><input id="nm" class="form-control mb-3" required>
     <label class="form-label">Email</label><input id="em" type="email" class="form-control mb-3" required>
     <label class="form-label">Password</label><input id="pw" type="password" class="form-control" minlength="8" required>
-    <div class="form-text mb-3">At least 8 characters with upper and lower case letters, a number and a symbol. A new account becomes the administrator of its own helpdesk. Employees and IT support accounts are created by that administrator.</div>
+    <div class="form-text mb-3">At least 8 characters with upper and lower case letters, a number and a symbol.</div>
     <button class="btn btn-main w-100">Create account</button></form>
     <p class="mt-3 mb-0 small"><a href="#" onclick="showAuth('login');return false">Back to sign in</a></p>`
   :`<form onsubmit="return doConfirm(event)">
@@ -109,7 +109,7 @@ async function start(){
   try{S.me=await api("/api/me");S.cats=await api("/api/categories")}catch(e){return showAuth("login",sessionStorage.getItem("at")?e.message:"")}
   const r=S.me.role; document.body.className="role-"+r;
   $("#app").innerHTML=`<div class="container-fluid"><div class="row">
-   <nav class="col-md-2 side p-2" id="nav"><div class="brand">IT Helpdesk</div><span class="chip">${ROLE[r]}</span><div class="px-3 small text-light" style="opacity:.75;margin:-.6rem 0 .8rem">${esc(S.me.org_name)}</div>
+   <nav class="col-md-2 side p-2" id="nav"><div class="brand">IT Helpdesk</div><span class="chip">${ROLE[r]}</span>
      ${NAV[r].map(l=>`<a href="${l[0]}"><span>${l[1]}</span>${l[1]==="Notifications"?'<span id="nb" class="badge bg-danger d-none"></span>':""}</a>`).join("")}
      <div class="px-3 pt-4 small text-light">${esc(S.me.full_name)}<br><span class="text-secondary">${esc(S.me.email)}</span></div>
      <a href="#" onclick="logout();return false" class="mt-2">Sign out</a></nav>
@@ -273,7 +273,7 @@ async function vUsers(){
    <div class="col-md-2"><input id="up" type="text" class="form-control" placeholder="Password" required></div>
    <div class="col-md-2"><select id="ur" class="form-select">${Object.keys(ROLE).map(k=>`<option value="${k}">${ROLE[k]}</option>`).join("")}</select></div>
    <div class="col-md-2"><button class="btn btn-main w-100">Create</button></div></div>
-   <div class="form-text">Password: 8+ characters with upper and lower case, a number and a symbol. Accounts you create belong only to your helpdesk.</div></form>
+   <div class="form-text">Password: 8+ characters with upper and lower case, a number and a symbol. People can also register themselves and start as Employee.</div></form>
   <div class="panel table-responsive"><table class="table mb-0 align-middle"><thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Active</th><th></th></tr></thead><tbody>`+
   us.map(u=>{const me=u.id===S.me.id;return `<tr><td>${esc(u.full_name)}</td><td>${esc(u.email)}</td>
    <td><select class="form-select form-select-sm w-auto" ${me?"disabled":""} onchange="setUser('${u.id}',{role:this.value})">${Object.keys(ROLE).map(k=>`<option value="${k}" ${k===u.role?"selected":""}>${ROLE[k]}</option>`).join("")}</select></td>
